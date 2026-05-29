@@ -1,0 +1,66 @@
+#!/bin/bash
+
+# ==================== 您的专属配置 ====================
+# 填入您在 Cloudflare 申请的 40位“编辑区域 DNS”令牌
+CF_TOKEN="换成您生成的40位Token"
+# 填入您要绑定的完整域名
+CF_DOMAIN="aw1.aaa.bbb"
+# =====================================================
+
+# 自动提取主域名（如 aw1.aaa.bbb 会自动提取出 aaa.bbb）
+ZONE_NAME=$(echo "$CF_DOMAIN" | awk -F. '{print $(NF-1)"."$NF}')
+
+echo "====== 开始执行 CF Token DDNS ======"
+
+# 1. 获取当前服务器公网 IPv4
+WAN_IP=$(curl -s -4 https://ipify.org || curl -s -4 https://icanhazip.com || curl -s -4 https://ifconfig.me)
+if [ -z "$WAN_IP" ]; then
+    echo "❌ 错误：无法获取当前公网 IP，请检查网络连接。"
+    exit 1
+fi
+echo "当前公网 IP: $WAN_IP"
+
+# 2. 获取 Zone ID
+ZONE_RES=$(curl -s -X GET "https://cloudflare.com" \
+     -H "Authorization: Bearer $CF_TOKEN" \
+     -H "Content-Type: application/json")
+
+ZONE_ID=$(echo "$ZONE_RES" | grep -o '"id":"[^"]*' | head -n 1 | grep -o '[^"]*$')
+
+if [ -z "$ZONE_ID" ]; then
+    echo "❌ 错误：获取 Zone ID 失败！"
+    echo "请检查原因：1. Token复制是否完整  2. Token是否赋予了该域名的[编辑DNS]权限。"
+    exit 1
+fi
+
+# 3. 获取现有解析记录的 ID 和旧 IP
+REC_RES=$(curl -s -X GET "https://cloudflare.com" \
+     -H "Authorization: Bearer $CF_TOKEN" \
+     -H "Content-Type: application/json")
+
+REC_ID=$(echo "$REC_RES" | grep -o '"id":"[^"]*' | head -n 1 | grep -o '[^"]*$')
+OLD_IP=$(echo "$REC_RES" | grep -o '"content":"[^"]*' | head -n 1 | grep -o '[^"]*$')
+
+# 4. 判断并执行更新
+if [ "$WAN_IP" = "$OLD_IP" ]; then
+    echo "✅ IP 未变动 ($WAN_IP)，无需重复更新。"
+    exit 0
+fi
+
+if [ -z "$REC_ID" ]; then
+    # 如果 Cloudflare 上还没有这条记录，直接新建
+    echo "未找到已有记录，正在新建 A 记录..."
+    curl -s -X POST "https://cloudflare.com" \
+         -H "Authorization: Bearer $CF_TOKEN" \
+         -H "Content-Type: application/json" \
+         --data "{\"type\":\"A\",\"name\":\"$CF_DOMAIN\",\"content\":\"$WAN_IP\",\"ttl\":120,\"proxied\":false}" > /dev/null
+    echo "🎉 成功创建新解析：$CF_DOMAIN -> $WAN_IP"
+else
+    # 如果记录存在且 IP 变了，直接更新
+    echo "检测到 IP 变化，正在将解析从 $OLD_IP 更新为 $WAN_IP..."
+    curl -s -X PUT "https://cloudflare.com/$REC_ID" \
+         -H "Authorization: Bearer $CF_TOKEN" \
+         -H "Content-Type: application/json" \
+         --data "{\"type\":\"A\",\"name\":\"$CF_DOMAIN\",\"content\":\"$WAN_IP\",\"ttl\":120,\"proxied\":false}" > /dev/null
+    echo "🎉 成功更新解析：$CF_DOMAIN -> $WAN_IP"
+fi
